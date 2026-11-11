@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Imola Test — circuito</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #111; font-family: monospace; }
+  #hud {
+    position: fixed; top: 10px; left: 10px; color: #0f0; background: rgba(0,0,0,.6);
+    padding: 8px 12px; border-radius: 6px; font-size: 13px; line-height: 1.5; z-index: 10;
+    white-space: pre;
+  }
+  #loading {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #fff; background: #111; font-size: 18px; z-index: 20;
+  }
+</style>
+</head>
+<body>
+<div id="loading">Cargando circuito… 0%</div>
+<div id="hud"></div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87b5e0);
+scene.fog = new THREE.Fog(0x87b5e0, 2000, 9000);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.5, 20000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(1000, 2000, 1000);
+scene.add(sun);
+
+// ---- COCHE super básico: una caja roja con "cabina" ----
+const car = new THREE.Group();
+const body = new THREE.Mesh(
+  new THREE.BoxGeometry(2.2, 1, 5),
+  new THREE.MeshStandardMaterial({ color: 0xdd2211 })
+);
+body.position.y = 0.8;
+const cab = new THREE.Mesh(
+  new THREE.BoxGeometry(1.8, 0.8, 2.2),
+  new THREE.MeshStandardMaterial({ color: 0x222222 })
+);
+cab.position.set(0, 1.6, -0.3);
+car.add(body, cab);
+scene.add(car);
+
+// ---- Carga del circuito ----
+const draco = new DRACOLoader();
+draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+const loader = new GLTFLoader();
+loader.setDRACOLoader(draco);
+
+let track = null;
+const loadingEl = document.getElementById('loading');
+loader.load('imola_circuit.glb', (gltf) => {
+  track = gltf.scene;
+  scene.add(track);
+  loadingEl.remove();
+  resetCar();
+}, (e) => {
+  if (e.total) loadingEl.textContent = 'Cargando circuito… ' + Math.round(e.lastModified ? 0 : e.loaded/e.total*100) + '%';
+}, (err) => {
+  loadingEl.textContent = 'ERROR cargando el GLB: ' + err.message;
+  loadingEl.style.color = '#f55';
+});
+
+// ---- Controles ----
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'KeyR') resetCar(); if (e.code === 'KeyC') toggleCam(); });
+addEventListener('keyup', e => keys[e.code] = false);
+
+let speed = 0, heading = 0;
+const MAX_SPEED = 80, ACCEL = 40, BRAKE = 80, DRAG = 15, TURN = 1.6;
+
+// posición inicial: encima del centro de la recta principal (se ajusta con R si hace falta)
+const START = new THREE.Vector3(-2170, 400, 1450);
+function resetCar() {
+  car.position.copy(START);
+  speed = 0; heading = 0;
+  snapToGround(true);
+}
+
+const ray = new THREE.Raycaster();
+const DOWN = new THREE.Vector3(0, -1, 0);
+function snapToGround(hard = false) {
+  if (!track) return;
+  ray.set(car.position.clone().add(new THREE.Vector3(0, hard ? 500 : 10, 0)), DOWN);
+  ray.far = hard ? 1500 : 60;
+  const hits = ray.intersectObject(track, true);
+  if (hits.length) {
+    const targetY = hits[0].point.y;
+    car.position.y = hard ? targetY : THREE.MathUtils.lerp(car.position.y, targetY, 0.4);
+    return true;
+  }
+  return false;
+}
+
+// ---- Cámara: persecución o libre ----
+let freeCam = false;
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.enabled = false;
+function toggleCam() {
+  freeCam = !freeCam;
+  orbit.enabled = freeCam;
+  if (freeCam) orbit.target.copy(car.position);
+}
+
+// ---- HUD ----
+const hud = document.getElementById('hud');
+let frames = 0, fps = 0, lastT = performance.now();
+setInterval(() => { fps = frames; frames = 0; }, 1000);
+
+// ---- Bucle ----
+let prev = performance.now();
+function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - prev) / 1000, 0.05);
+  prev = now; frames++;
+
+  if (!freeCam) {
+    const fwd = keys['ArrowUp'] || keys['KeyW'];
+    const back = keys['ArrowDown'] || keys['KeyS'];
+    const boost = keys['ShiftLeft'] ? 2.5 : 1;
+    if (fwd) speed += ACCEL * boost * dt;
+    else if (back) speed -= BRAKE * dt;
+    else speed -= Math.sign(speed) * DRAG * dt;
+    speed = THREE.MathUtils.clamp(speed, -20, MAX_SPEED * boost);
+    if (Math.abs(speed) < 0.3 && !fwd && !back) speed = 0;
+
+    const turnDir = (keys['ArrowLeft'] || keys['KeyA'] ? 1 : 0) - (keys['ArrowRight'] || keys['KeyD'] ? 1 : 0);
+    heading += turnDir * TURN * dt * Math.min(1, Math.abs(speed) / 15) * Math.sign(speed || 1);
+
+    car.rotation.y = heading;
+    car.position.x -= Math.sin(heading) * speed * dt * -1;
+    car.position.z -= Math.cos(heading) * speed * dt;
+    const onTrack = snapToGround();
+
+    // cámara persecución
+    const camPos = car.position.clone().add(
+      new THREE.Vector3(Math.sin(heading) * 14, 7, Math.cos(heading) * 14)
+    );
+    camera.position.lerp(camPos, 0.12);
+    camera.lookAt(car.position.x, car.position.y + 2, car.position.z);
+
+    hud.textContent =
+      `vel: ${Math.abs(speed * 3.6).toFixed(0)} km/h` +
+      `\npos: ${car.position.x.toFixed(0)}, ${car.position.y.toFixed(0)}, ${car.position.z.toFixed(0)}` +
+      `\nsuelo: ${onTrack ? 'SÍ' : '¡NO! (agujero o fuera)'}` +
+      `\nfps: ${fps}` +
+      `\n\nWASD/flechas conducir · Shift turbo` +
+      `\nR reset · C cámara libre`;
+  } else {
+    orbit.update();
+    hud.textContent = `CÁMARA LIBRE (arrastra ratón, rueda zoom)\nC para volver al coche · fps: ${fps}`;
+  }
+
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(loop);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
